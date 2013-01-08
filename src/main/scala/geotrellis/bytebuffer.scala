@@ -11,7 +11,6 @@ object Implicits {
     def skipBbox = b.skip(32) // skip 4 doubles (32 bytes)
   }
 
-  // perhaps this shouldn't live in a package object
   implicit def extendByteBuffer(b: ByteBuffer):ExtendedByteBuffer = new ExtendedByteBuffer(b)
 
 }
