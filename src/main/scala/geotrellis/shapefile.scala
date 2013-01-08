@@ -10,17 +10,67 @@ import java.io.RandomAccessFile
 
 package object shapefile {
 
-  class ExtendedByteBuffer(val b: ByteBuffer) extends AnyVal {
-    def little = b.order(ByteOrder.LITTLE_ENDIAN)
-    def big = b.order(ByteOrder.BIG_ENDIAN)
-    def skip(nBytes: Int) = b.position(b.position + nBytes)
-    def skipBbox = b.skip(32) // skip 4 doubles (32 bytes)
-  }
-
-  // perhaps this shouldn't live in a package object
-  implicit def extendByteBuffer(b: ByteBuffer):ExtendedByteBuffer = new ExtendedByteBuffer(b)
+  import Implicits._
 
   case class Record(id: Int, g: Geometry)
+
+  class ShapefileParser extends ShapefileStructure with TypeMapper
+
+  object Parser {
+    def apply(f: String)(implicit g: GeometryFactory) = new ShapefileParser().parse(f)(g)
+  }
+
+  trait TypeMapper {
+    val types = Seq(NullParser,PointParser,PolyLineParser,PolygonParser,MultiPointParser)
+    def getType(n: Int):Either[String,ShapeParser] = types.filter(_.shapeType == n).headOption match {
+      case Some(t) => Right(t)
+      case None => Left(s"Failed to fine a valid type for $n")
+    }
+  }
+
+  trait ShapefileStructure { this: TypeMapper =>
+
+    def parseMagicNumber(b: ByteBuffer) {
+      if (b.big.getInt != 9994)
+        sys.error("Expected 9994 (shapefile magic number)")
+    }
+
+    def parseVersion(b: ByteBuffer) {
+      if (b.little.getInt != 1000)
+        sys.error("Expected 1000 (invalid version)")
+    }
+
+    def parseShapeType(b: ByteBuffer):ShapeParser = getType(b.little.getInt) match {
+      case Right(t) => t
+      case Left(t) => sys.error(t)
+    }
+
+    def parseHeader(b: ByteBuffer):ShapeParser = {
+      parseMagicNumber(b.big)
+      b.skip(20) // skip 5 ints
+      b.getInt // ignore length
+      parseVersion(b)
+
+      val shapeParser = parseShapeType(b)
+      b.skip(8*8) // skip bbox (x,y,z,m)
+
+      shapeParser
+    }
+
+    def parse(fileName: String)(implicit g: GeometryFactory):Seq[Record] = {
+      val inChannel = new RandomAccessFile(fileName, "r").getChannel()
+      val buffer = inChannel.map(FileChannel.MapMode.READ_ONLY, 0, inChannel.size())
+
+      val parser = parseHeader(buffer)
+
+      var gs = Seq.empty[Record]
+      while(buffer.position < buffer.limit)
+        gs = gs :+ parser.parseRecord(buffer)
+
+      inChannel.close()
+      gs
+    }
+  }
 
   trait ShapeParser {
     val shapeType: Int
@@ -115,57 +165,5 @@ package object shapefile {
 
     def buildCollection(a: Seq[LinearRing])(implicit g: GeometryFactory) = 
       g.createPolygon(a.head, a.tail.toArray)
-  }
-
-  class ShapefileParser extends ShapefileStructure with TypeMapper
-
-  object Parser {
-    def apply(f: String)(implicit g: GeometryFactory) = new ShapefileParser().parse(f)(g)
-  }
-
-  trait TypeMapper {
-    val types = Seq(NullParser,PointParser,PolyLineParser,PolygonParser,MultiPointParser)
-    def getType(n: Int):Either[String,ShapeParser] = types.filter(_.shapeType == n).headOption match {
-      case Some(t) => Right(t)
-      case None => Left(s"Failed to fine a valid type for $n")
-    }
-  }
-
-  trait ShapefileStructure { this: TypeMapper =>
-
-    def parseMagicNumber(b: ByteBuffer) {
-      if (b.big.getInt != 9994)
-        sys.error("Expected 9994 (shapefile magic number)")
-    }
-
-    def parseVersion(b: ByteBuffer) {
-      if (b.little.getInt != 1000)
-        sys.error("Expected 1000 (invalid version)")
-    }
-
-    def parseShapeType(b: ByteBuffer):ShapeParser = getType(b.little.getInt) match {
-      case Right(t) => t
-      case Left(t) => sys.error(t)
-    }
-
-    def parse(fileName: String)(implicit g: GeometryFactory):Seq[Record] = {
-      val inChannel = new RandomAccessFile(fileName, "r").getChannel()
-      val buffer = inChannel.map(FileChannel.MapMode.READ_ONLY, 0, inChannel.size())
-
-      parseMagicNumber(buffer.big)
-      buffer.skip(20) // skip 5 ints
-      buffer.getInt // ignore length
-      parseVersion(buffer)
-
-      val shapeParser = parseShapeType(buffer)
-      buffer.skip(8*8) // skip bbox (x,y,z,m)
-
-      var gs = Seq.empty[Record]
-      while(buffer.position < buffer.limit)
-        gs = gs :+ shapeParser.parseRecord(buffer)
-
-      inChannel.close()
-      gs
-    }
   }
 }
