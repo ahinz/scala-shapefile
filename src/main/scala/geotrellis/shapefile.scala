@@ -10,33 +10,28 @@ import java.io.RandomAccessFile
 
 package object shapefile {
 
-  trait TypeMapper {
-    val types = Seq(NullParser,PointParser,PolyLineParser,PolygonParser,MultiPointParser)
-    def getType(n: Int):Either[Int,ShapeParser] = types.filter(_.shapeType == n).headOption match {
-      case Some(t) => Right(t)
-      case None => Left(n)
-    }
+  class ExtendedByteBuffer(val b: ByteBuffer) extends AnyVal {
+    def little = b.order(ByteOrder.LITTLE_ENDIAN)
+    def big = b.order(ByteOrder.BIG_ENDIAN)
+    def skip(nBytes: Int) = b.position(b.position + nBytes)
+    def skipBbox = b.skip(32) // skip 4 doubles (32 bytes)
   }
 
-  trait ShapefileUtil {
-    final def little(b: ByteBuffer) = b.order(ByteOrder.LITTLE_ENDIAN)
-    final def big(b: ByteBuffer) = b.order(ByteOrder.BIG_ENDIAN)
-    final def skip(b: ByteBuffer, nBytes: Int) = b.position(b.position + nBytes)
-    final def skipBbox(b: ByteBuffer) = skip(b, 32) // skip 4 doubles (32 bytes)
-  }
+  // perhaps this shouldn't live in a package object
+  implicit def extendByteBuffer(b: ByteBuffer):ExtendedByteBuffer = new ExtendedByteBuffer(b)
 
   case class Record(id: Int, g: Geometry)
 
-  trait ShapeParser extends ShapefileUtil {
+  trait ShapeParser {
     val shapeType: Int
 
     def apply(b: ByteBuffer)(implicit g: GeometryFactory): Geometry
     def parse(b: ByteBuffer)(implicit g: GeometryFactory): Geometry = apply(b)
 
     def parseRecord(b: ByteBuffer)(implicit g: GeometryFactory): Record = {
-      val rid = big(b).getInt
-      val clen = big(b).getInt
-      val shpTyp = little(b).getInt
+      val rid = b.big.getInt
+      val clen = b.big.getInt
+      val shpTyp = b.little.getInt
 
       shpTyp match {
         case NullParser.shapeType => Record(rid, NullParser(b))
@@ -58,7 +53,7 @@ package object shapefile {
     lazy val shapeType = 1
 
     def apply(b: ByteBuffer)(implicit g: GeometryFactory) = {
-      g.createPoint(new Coordinate(little(b).getDouble, b.getDouble))
+      g.createPoint(new Coordinate(b.little.getDouble, b.getDouble))
     }
   }
 
@@ -66,14 +61,14 @@ package object shapefile {
     lazy val shapeType = 8
 
     def apply(b: ByteBuffer)(implicit g: GeometryFactory) = {
-      skipBbox(b)
+      b.skipBbox
       g.createMultiPoint(
-        Array.ofDim[Point](little(b).getInt) map { _ => PointParser(b) })
+        Array.ofDim[Point](b.little.getInt) map { _ => PointParser(b) })
     }
   }
 
   trait PolyThingParser extends ShapeParser {
-    def parseCoordinate(b: ByteBuffer) = new Coordinate(little(b).getDouble, b.getDouble)
+    def parseCoordinate(b: ByteBuffer) = new Coordinate(b.little.getDouble, b.getDouble)
 
     // rewrite as fold?
     @tailrec
@@ -90,9 +85,9 @@ package object shapefile {
     def buildCollection(a: Seq[A])(implicit g: GeometryFactory):Geometry
 
     def apply(b: ByteBuffer)(implicit g: GeometryFactory) = {
-      skipBbox(b)
-      val nParts = little(b).getInt
-      val nPts = little(b).getInt
+      b.skipBbox
+      val nParts = b.little.getInt
+      val nPts = b.little.getInt
       val terminals = (0 until nParts).map { _ => b.getInt }
       val tOffsets = terminals.zip(0 +: terminals).map { case (a,b) => a - b }
 
@@ -128,42 +123,42 @@ package object shapefile {
     def apply(f: String)(implicit g: GeometryFactory) = new ShapefileParser().parse(f)(g)
   }
 
-  trait ShapefileStructure extends ShapefileUtil { this: TypeMapper =>
+  trait TypeMapper {
+    val types = Seq(NullParser,PointParser,PolyLineParser,PolygonParser,MultiPointParser)
+    def getType(n: Int):Either[String,ShapeParser] = types.filter(_.shapeType == n).headOption match {
+      case Some(t) => Right(t)
+      case None => Left(s"Failed to fine a valid type for $n")
+    }
+  }
 
-    case class BBox(xMin: Double, yMin: Double, xMax: Double, yMax: Double,
-      zMin: Double, zMax: Double, mMin: Double, mMax: Double)
-
-    // xmin,ymin,xmax,ymax,zmin,zmax,min,mmax
-    def parseBbox(b: ByteBuffer) =
-      BBox(b.getDouble, b.getDouble, b.getDouble, b.getDouble,
-        b.getDouble, b.getDouble, b.getDouble, b.getDouble)
+  trait ShapefileStructure { this: TypeMapper =>
 
     def parseMagicNumber(b: ByteBuffer) {
-      if (big(b).getInt != 9994)
+      if (b.big.getInt != 9994)
         sys.error("Expected 9994 (shapefile magic number)")
     }
 
     def parseVersion(b: ByteBuffer) {
-      if (little(b).getInt != 1000)
+      if (b.little.getInt != 1000)
         sys.error("Expected 1000 (invalid version)")
     }
 
-    def parseShapeType(b: ByteBuffer):ShapeParser = getType(little(b).getInt) match {
+    def parseShapeType(b: ByteBuffer):ShapeParser = getType(b.little.getInt) match {
       case Right(t) => t
-      case Left(t) => sys.error(s"Couldn't parse shape type ($t)")
+      case Left(t) => sys.error(t)
     }
 
     def parse(fileName: String)(implicit g: GeometryFactory):Seq[Record] = {
       val inChannel = new RandomAccessFile(fileName, "r").getChannel()
-      val buffer = big(inChannel.map(FileChannel.MapMode.READ_ONLY, 0, inChannel.size()))
+      val buffer = inChannel.map(FileChannel.MapMode.READ_ONLY, 0, inChannel.size())
 
-      parseMagicNumber(buffer)
-      skip(buffer, 20) // skip 5 ints
+      parseMagicNumber(buffer.big)
+      buffer.skip(20) // skip 5 ints
       buffer.getInt // ignore length
       parseVersion(buffer)
 
       val shapeParser = parseShapeType(buffer)
-      val bbox = parseBbox(buffer)
+      buffer.skip(8*8) // skip bbox (x,y,z,m)
 
       var gs = Seq.empty[Record]
       while(buffer.position < buffer.limit)
