@@ -1,0 +1,5 @@
+package geotrellis
+
+trait ShapefileParser {
+
+}
